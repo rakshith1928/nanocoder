@@ -1,4 +1,4 @@
-import {Box, Text, useFocus, useInput} from 'ink';
+import {Box, Text, useFocus, useInput, type Key} from 'ink';
 import Spinner from 'ink-spinner';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {commandRegistry} from '@/commands';
@@ -29,6 +29,62 @@ import {
 import {handleFileMention} from '@/utils/file-mention-handler';
 import {assemblePrompt} from '@/utils/prompt-processor';
 import type {ActiveEditorState} from '@/vscode/vscode-server';
+
+type CommandCompletionSession = {
+	replaceEnd: number;
+	frozen: boolean;
+};
+
+function applyCommandCompletion(
+	input: string,
+	selectedName: string,
+	session: CommandCompletionSession,
+): string {
+	const after = input.slice(session.replaceEnd);
+	const sep = after && !after.startsWith(' ') ? ' ' : '';
+	return '/' + selectedName + sep + after;
+}
+
+function updateCompletionSession(
+	current: CommandCompletionSession | null,
+	inputChar: string,
+	key: Key,
+	input: string,
+): CommandCompletionSession | null {
+	if (!input.startsWith('/')) return null;
+
+	if (inputChar === '/') return {replaceEnd: 1, frozen: false};
+
+	if (!current) return null;
+
+	let next: CommandCompletionSession | null = current;
+
+	if (
+		!next.frozen &&
+		inputChar !== '' &&
+		inputChar !== ' ' &&
+		inputChar !== '\n' &&
+		!key.ctrl &&
+		!key.meta &&
+		!key.tab &&
+		!key.return &&
+		!key.escape &&
+		!key.upArrow &&
+		!key.downArrow &&
+		!key.leftArrow &&
+		!key.rightArrow &&
+		!key.backspace &&
+		!key.delete
+	) {
+		next = {replaceEnd: next.replaceEnd + 1, frozen: next.frozen};
+	}
+
+	if (inputChar === ' ') {
+		next = {...next, frozen: true};
+	}
+
+	return next;
+}
 
 interface ChatProps {
 	onSubmit?: (
@@ -83,6 +139,7 @@ export default function UserInput({
 	const {boxWidth, isNarrow} = useResponsiveTerminal();
 	const [textInputKey, setTextInputKey] = useState(0);
 	const completionJustSelectedRef = useRef(false);
+	const completionSessionRef = useRef<CommandCompletionSession | null>(null);
 	// Store the full InputState draft when starting history navigation, so it can be restored
 	const savedDraftRef = useRef<InputState>({
 		displayValue: '',
@@ -205,7 +262,9 @@ export default function UserInput({
 			return [];
 		}
 
-		const commandPrefix = input.slice(1).split(' ')[0];
+		const commandPrefix = completionSessionRef.current
+			? input.slice(1, completionSessionRef.current.replaceEnd)
+			: input.slice(1).split(' ')[0];
 
 		const builtInCompletions = commandRegistry.getCompletions(commandPrefix);
 		const customCompletions = customCommands
@@ -332,11 +391,30 @@ export default function UserInput({
 		// Save the InputState to history and send assembled message to AI
 		promptHistory.addPrompt(currentState);
 		onSubmit(assembled, display, images.length > 0 ? images : undefined);
-		resetInput();
 		resetUIState();
+		completionJustSelectedRef.current = true;
 		setAttachments([]);
+		if (assembled.trim().startsWith('/')) {
+			const spaceIdx = assembled.indexOf(' ');
+			if (spaceIdx !== -1) {
+				const rest = assembled.slice(spaceIdx + 1);
+				if (rest) {
+					setInputState({
+						displayValue: rest,
+						placeholderContent: {},
+					});
+					setTextInputKey(prev => prev + 1);
+				} else {
+					resetInput();
+				}
+			} else {
+				resetInput();
+			}
+		} else {
+			resetInput();
+		}
 		promptHistory.resetIndex();
-	}, [attachments, onSubmit, resetInput, resetUIState, currentState]);
+	}, [attachments, onSubmit, resetInput, resetUIState, currentState, setInputState, setTextInputKey]);
 
 	// Handle escape key logic
 	const handleEscape = useCallback(() => {
@@ -459,6 +537,27 @@ export default function UserInput({
 			return;
 		}
 
+	completionSessionRef.current = updateCompletionSession(
+		completionSessionRef.current,
+		inputChar,
+		key,
+		input,
+	);
+
+	// Complete a command using the current session. Pure — does not create state.
+	// For paste/history (no session), creates a one-shot session so all
+	// replacement logic stays in applyCommandCompletion.
+	const completeCommand = (name: string) => {
+		if (completionSessionRef.current) {
+			return applyCommandCompletion(input, name, completionSessionRef.current);
+		}
+		const space = input.indexOf(' ', 1);
+		return applyCommandCompletion(input, name, {
+			replaceEnd: space === -1 ? input.length : space,
+			frozen: true,
+		});
+	};
+
 		// Ctrl+V: pull an image off the system clipboard as an attachment.
 		// Terminal paste of regular text arrives as a bracketed paste, not as
 		// Ctrl+V, so this binding is free to mean "paste image".
@@ -497,15 +596,14 @@ export default function UserInput({
 					return;
 				}
 				if (commandCompletions.length === 1) {
-					// Auto-complete when there's exactly one match
-					const completion = commandCompletions[0];
-					const completedText = `/${completion.name}`;
-					// Use setInputState to bypass paste detection for autocomplete
+					const name = commandCompletions[0].name;
+					const completedText = completeCommand(name);
 					setInputState({
 						displayValue: completedText,
 						placeholderContent: currentState.placeholderContent,
 					});
 					setTextInputKey(prev => prev + 1);
+					completionSessionRef.current = null;
 				} else if (commandCompletions.length > 1) {
 					// Show completions when there are multiple matches
 					setCompletions(commandCompletions);
@@ -551,16 +649,17 @@ export default function UserInput({
 			completions.length > 0 &&
 			selectedCompletionIndex >= 0
 		) {
-			const selected = completions[selectedCompletionIndex];
-			const completedText = `/${selected.name}`;
+			const name = completions[selectedCompletionIndex].name;
+			const completedText = completeCommand(name);
 			completionJustSelectedRef.current = true;
 			setInputState({
 				displayValue: completedText,
-				placeholderContent: {},
+				placeholderContent: currentState.placeholderContent,
 			});
 			setShowCompletions(false);
 			setSelectedCompletionIndex(-1);
 			setTextInputKey(prev => prev + 1);
+			completionSessionRef.current = null;
 			return;
 		}
 

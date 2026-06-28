@@ -447,30 +447,33 @@ test('Enter selects the highlighted completion and populates the input', async t
 	unmount();
 });
 
-test('typing a space after a command hides completions so args submit', async t => {
-	const {stdin, lastFrame, unmount} = render(
-		<TestWrapper>
-			<UserInput forceFocus={true} customCommands={TEST_COMMANDS} />
-		</TestWrapper>,
-	);
+	test('typing a space after a command keeps completions visible', async t => {
+		const {stdin, lastFrame, unmount} = render(
+			<TestWrapper>
+				<UserInput forceFocus={true} customCommands={TEST_COMMANDS} />
+			</TestWrapper>,
+		);
 
-	stdin.write('/test-help');
-	await wait();
+		// Send characters individually to simulate real keystrokes
+		for (const ch of '/test-help') {
+			stdin.write(ch);
+			await wait();
+		}
 
-	// While still typing the command name, completions are visible
-	t.regex(lastFrame()!, /Available commands:/);
+		t.regex(lastFrame()!, /Available commands:/);
 
-	// Once a space is typed, the user is entering arguments - completions hide
-	// so Enter submits the full `/test-help arg` instead of selecting `/test-help`
-	stdin.write(' arg');
-	await wait();
+		// Completions stay visible after typing a space — the session correctly
+		// handles replacement so selecting a completion preserves arguments
+		for (const ch of ' arg') {
+			stdin.write(ch);
+			await wait();
+		}
 
-	const afterArg = lastFrame()!;
-	t.notRegex(afterArg, /Available commands:/);
-	t.regex(afterArg, /\/test-help arg/);
+		t.regex(lastFrame()!, /Available commands:/);
+		t.regex(lastFrame()!, /\/test-help arg/);
 
-	unmount();
-});
+		unmount();
+	});
 
 test('completion menu dismissal/reset after selection or escape', async t => {
 	const {stdin, lastFrame, unmount} = render(
