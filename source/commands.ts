@@ -88,6 +88,11 @@ class CommandRegistry {
 				return a.name.localeCompare(b.name);
 			});
 
+		// If no matches, return all commands (fallback for typing / in front of existing text)
+		if (scoredCommands.length === 0) {
+			return commandNames.sort((a, b) => a.localeCompare(b));
+		}
+
 		return scoredCommands.map(cmd => cmd.name);
 	}
 
